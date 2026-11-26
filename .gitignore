@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Never commit credentials or audit output (reports can contain resource names / IAM members)
+*.json
+!tests/**/*.json
+*-key.json
+service-account*.json
+application_default_credentials.json
+cis-gcp-audit.*
+*.html
+*.csv
