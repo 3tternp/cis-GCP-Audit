@@ -1,6 +1,7 @@
 """Tkinter GUI for the CIS GCP audit tool."""
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import tkinter as tk
@@ -12,7 +13,8 @@ from .models import ERROR, FAIL, MANUAL, NA, PASS, Result
 from .checks import SECTIONS
 from .runner import all_checks, run_audit, select_checks, summarize
 
-_TAG_COLORS = {FAIL: "#fce8e6", ERROR: "#fef7e0", MANUAL: "#f1f3f4", PASS: "#e6f4ea", NA: "#ffffff"}
+ICON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "icon.png")
+_TAG_COLORS ={FAIL: "#fce8e6", ERROR: "#fef7e0", MANUAL: "#f1f3f4", PASS: "#e6f4ea", NA: "#ffffff"}
 _SEV_RANK = {"High": 0, "Medium": 1, "Low": 2}
 
 
@@ -20,8 +22,17 @@ class App(tk.Tk):
     def __init__(self, demo: bool = False):
         super().__init__()
         self.title(f"CIS GCP Audit Tool v{__version__}")
-        self.geometry("1280x820")
-        self.minsize(1000, 680)
+        self.geometry("1360x860")
+        self.minsize(1100, 700)
+
+        self._icon_small = None
+        try:  # window/taskbar icon + header logo; the app works fine without it
+            big = tk.PhotoImage(file=ICON_PATH)
+            self.iconphoto(True, big)
+            self._icon_small = big.subsample(5)  # 256px -> ~51px
+            self._icon_big = big  # keep a reference so Tk doesn't garbage-collect it
+        except tk.TclError:
+            pass
 
         self.results: list[Result] = []
         self.q: "queue.Queue" = queue.Queue()
@@ -55,10 +66,20 @@ class App(tk.Tk):
         paned.add(left, weight=0)
         paned.add(right, weight=1)
 
+        # -- header with app icon
+        head = ttk.Frame(left)
+        head.pack(fill="x", pady=(0, 6))
+        if self._icon_small is not None:
+            ttk.Label(head, image=self._icon_small).pack(side="left", padx=(2, 8))
+        titles = ttk.Frame(head)
+        titles.pack(side="left")
+        ttk.Label(titles, text="CIS GCP Audit", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        ttk.Label(titles, text="Read-only benchmark scanner", foreground="#5f6368").pack(anchor="w")
+
         # -- authentication
         auth = ttk.LabelFrame(left, text="1. Authentication")
         auth.pack(fill="x", pady=(0, 6))
-        ttk.Radiobutton(auth, text="Application Default Credentials (gcloud auth application-default login)",
+        ttk.Radiobutton(auth, text="Application Default Credentials (gcloud ADC)",
                         variable=self.auth_mode, value="adc", command=self._auth_changed).pack(anchor="w", padx=6)
         ttk.Radiobutton(auth, text="Service account key file (JSON)", variable=self.auth_mode,
                         value="key", command=self._auth_changed).pack(anchor="w", padx=6)
@@ -68,7 +89,7 @@ class App(tk.Tk):
         self.key_entry.pack(side="left", fill="x", expand=True)
         self.key_btn = ttk.Button(row, text="Browse", width=8, state="disabled", command=self._browse_key)
         self.key_btn.pack(side="left", padx=(4, 0))
-        ttk.Radiobutton(auth, text="OAuth access token (gcloud auth print-access-token)",
+        ttk.Radiobutton(auth, text="OAuth access token",
                         variable=self.auth_mode, value="token", command=self._auth_changed).pack(anchor="w", padx=6)
         self.tok_entry = ttk.Entry(auth, textvariable=self.token, show="*", state="disabled")
         self.tok_entry.pack(fill="x", padx=22, pady=(0, 4))
@@ -125,10 +146,10 @@ class App(tk.Tk):
         ttk.Label(left, textvariable=self.status_text, wraplength=340, foreground="#5f6368").pack(anchor="w")
 
         # -- results (right)
+        self.summary = ttk.Label(right, text="No results yet.", font=("Segoe UI", 11, "bold"))
+        self.summary.pack(fill="x", pady=(0, 4))
         top = ttk.Frame(right)
         top.pack(fill="x")
-        self.summary = ttk.Label(top, text="No results yet.", font=("Segoe UI", 10, "bold"))
-        self.summary.pack(side="left")
         for txt, fn in (("Export HTML", report.to_html), ("Export CSV", report.to_csv),
                         ("Export JSON", report.to_json)):
             ttk.Button(top, text=txt, command=lambda f=fn, t=txt: self._export(f, t)).pack(side="right", padx=2)
@@ -139,9 +160,10 @@ class App(tk.Tk):
 
         cols = ("id", "project", "title", "severity", "status")
         self.tree = ttk.Treeview(right, columns=cols, show="headings", selectmode="browse")
-        for c, w in zip(cols, (60, 130, 520, 70, 70)):
+        for c, w in zip(cols, (60, 120, 300, 80, 80)):
             self.tree.heading(c, text=c.title(), command=lambda c=c: self._sort(c))
-            self.tree.column(c, width=w, anchor="w", stretch=(c == "title"))
+            self.tree.column(c, width=w, minwidth=w if c != "title" else 150, anchor="w",
+                             stretch=(c == "title"))
         for st, col in _TAG_COLORS.items():
             self.tree.tag_configure(st, background=col)
         vs = ttk.Scrollbar(right, command=self.tree.yview)
@@ -339,4 +361,10 @@ class App(tk.Tk):
 
 
 def main(demo: bool = False):
+    if os.name == "nt":  # crisp text on high-DPI Windows displays
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
     App(demo=demo).mainloop()
