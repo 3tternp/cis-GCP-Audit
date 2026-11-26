@@ -25,12 +25,13 @@ SEC_BQ = "7 - BigQuery"
 SEC_GKE = "8 - GKE"
 SEC_DP = "9 - Dataproc"
 SEC_OP = "10 - Organization Policy"
-SECTIONS = [SEC_IAM, SEC_LOG, SEC_NET, SEC_VM, SEC_STO, SEC_SQL, SEC_BQ, SEC_GKE, SEC_DP, SEC_OP]
+SEC_ORG = "11 - Organization level"
+SECTIONS = [SEC_IAM, SEC_LOG, SEC_NET, SEC_VM, SEC_STO, SEC_SQL, SEC_BQ, SEC_GKE, SEC_DP, SEC_OP, SEC_ORG]
 
 
-def check(cid, title, section, level, severity, description, remediation):
+def check(cid, title, section, level, severity, description, remediation, scope="project"):
     def deco(fn: Callable) -> Callable:
-        REGISTRY.append(Check(cid, title, section, level, severity, description, remediation, fn))
+        REGISTRY.append(Check(cid, title, section, level, severity, description, remediation, fn, scope))
         return fn
     return deco
 
@@ -147,6 +148,55 @@ class Context:
             return out
         return self.memo("dp", load)
 
+    # Networking extras
+    def dns_policies(self) -> List[dict]:
+        def load():
+            try:
+                return self.c.list(f"https://dns.googleapis.com/dns/v1/projects/{self.p}/policies", "policies")
+            except ApiError as exc:
+                if exc.service_disabled:   # Cloud DNS off => no resolver logging can exist
+                    return []
+                raise
+        return self.memo("dnspol", load)
+
+    def backend_services(self) -> List[dict]:
+        return self.memo("backends", lambda: self.c.agg_list(
+            f"https://compute.googleapis.com/compute/v1/projects/{self.p}/aggregated/backendServices",
+            "backendServices"))
+
+    def tls_proxies(self) -> List[dict]:
+        base = f"https://compute.googleapis.com/compute/v1/projects/{self.p}/global"
+        return self.memo("proxies", lambda: self.c.list(f"{base}/targetHttpsProxies", "items")
+                         + self.c.list(f"{base}/targetSslProxies", "items"))
+
+    def ssl_policies(self) -> List[dict]:
+        return self.memo("sslpol", lambda: self.c.list(
+            f"https://compute.googleapis.com/compute/v1/projects/{self.p}/global/sslPolicies", "items"))
+
+    def disks(self) -> List[dict]:
+        return self.memo("disks", lambda: self.c.agg_list(
+            f"https://compute.googleapis.com/compute/v1/projects/{self.p}/aggregated/disks", "disks"))
+
+    def bq_tables(self, limit: int = 200):
+        """(tables, truncated). Fetches each table individually, so it is capped."""
+        def load():
+            out, truncated = [], False
+            for d in self.bq_datasets():
+                did = d["datasetReference"]["datasetId"]
+                refs = self.c.list(f"https://bigquery.googleapis.com/bigquery/v2/projects/{self.p}"
+                                   f"/datasets/{did}/tables", "tables")
+                for t in refs:
+                    if len(out) >= limit:
+                        truncated = True
+                        break
+                    tid = t["tableReference"]["tableId"]
+                    full = self.c.get(f"https://bigquery.googleapis.com/bigquery/v2/projects/{self.p}"
+                                      f"/datasets/{did}/tables/{tid}")
+                    full["_label"] = f"{did}.{tid}"
+                    out.append(full)
+            return out, truncated
+        return self.memo("bqtables", load)
+
     def service_accounts(self) -> List[dict]:
         return self.memo("sas", lambda: self.c.list(
             f"https://iam.googleapis.com/v1/projects/{self.p}/serviceAccounts", "accounts"))
@@ -222,6 +272,48 @@ class Context:
         return self.memo("bq", load)
 
 
+class OrgContext(Context):
+    """Same interface as Context but scoped to an organization.
+
+    Lets IAM / audit-logging check functions run unchanged at org level.
+    ``.p`` is the label shown in results ("org:<id>").
+    """
+
+    def __init__(self, client, org_id: str):
+        super().__init__(client, f"org:{org_id}")
+        self.org_id = org_id
+
+    def iam_policy(self) -> dict:
+        return self.memo("iam", lambda: self.c.post(
+            f"https://cloudresourcemanager.googleapis.com/v3/organizations/{self.org_id}:getIamPolicy",
+            {"options": {"requestedPolicyVersion": 3}}))
+
+    def inherited_policies(self):
+        return [], []
+
+    def inherited_sinks(self):
+        return [], []
+
+    def sinks(self) -> List[dict]:
+        return self.memo("sinks", lambda: self.c.list(
+            f"https://logging.googleapis.com/v2/organizations/{self.org_id}/sinks", "sinks"))
+
+    def essential_contacts(self) -> List[dict]:
+        return self.memo("contacts", lambda: self.c.list(
+            f"https://essentialcontacts.googleapis.com/v1/organizations/{self.org_id}/contacts", "contacts"))
+
+    def org_policy(self, constraint: str) -> dict:
+        def load():
+            try:
+                return self.c.get(f"https://orgpolicy.googleapis.com/v2/organizations/{self.org_id}"
+                                  f"/policies/{constraint}:getEffectivePolicy")
+            except ApiError as exc:
+                if exc.status == 404:
+                    return {}
+                raise
+        return self.memo("op:" + constraint, load)
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -269,8 +361,8 @@ def public_members(bindings) -> List[str]:
 def c_1_1(ctx):
     bad = sorted({m for b in ctx.iam_policy().get("bindings", []) for m in b.get("members", [])
                   if m.startswith("user:") and m.lower().endswith("@gmail.com")})
-    return failed("Personal Gmail accounts hold project roles", bad) if bad else passed(
-        "No @gmail.com members in the project IAM policy")
+    return failed("Personal Gmail accounts hold roles", bad) if bad else passed(
+        "No @gmail.com members in the IAM policy")
 
 
 manual("1.2", "MFA / 2-Step Verification is enforced for all non-service accounts", SEC_IAM, 1, "High",
@@ -314,8 +406,8 @@ def c_1_6(ctx):
     roles = ("roles/iam.serviceAccountUser", "roles/iam.serviceAccountTokenCreator")
     bad = [f"{m} -> {b['role']}" for b in ctx.iam_policy().get("bindings", []) if b["role"] in roles
            for m in b.get("members", [])]
-    return failed("Project-level impersonation roles granted", bad) if bad else passed(
-        "Neither role is granted at project level")
+    return failed("Broad impersonation roles granted", bad) if bad else passed(
+        "Neither role is granted at this level")
 
 
 @check("1.7", "User-managed service account keys are rotated within 90 days", SEC_IAM, 1, "Medium",
@@ -332,9 +424,6 @@ def c_1_7(ctx):
     return evaluate(total, bad, "user-managed keys")
 
 
-manual("1.8", "Separation of duties is enforced for service-account-related roles", SEC_IAM, 2, "Medium",
-       "No principal should hold both Service Account Admin and Service Account User.",
-       "Review IAM at project/folder/org level and split the roles across principals.")
 
 
 def _kms_keys(ctx):
@@ -390,7 +479,7 @@ def c_1_10(ctx):
 def c_2_1(ctx):
     # Audit configs are additive down the hierarchy: evaluate org + folders + project together.
     inherited, notes = ctx.inherited_policies()
-    cfgs = [("project", c) for c in ctx.iam_policy().get("auditConfigs", []) or []]
+    cfgs = [("direct", c) for c in ctx.iam_policy().get("auditConfigs", []) or []]
     for label, pol in inherited:
         cfgs += [(label, c) for c in pol.get("auditConfigs", []) or []]
     need = {"ADMIN_READ", "DATA_READ", "DATA_WRITE"}
@@ -685,9 +774,6 @@ def c_4_6(ctx):
     return evaluate(len(vms), bad, "VM instances")
 
 
-manual("4.7", "VM disks for critical VMs are encrypted with Customer-Supplied Encryption Keys", SEC_VM, 2, "Medium",
-       "Identify critical VMs and verify their disks use CSEK (diskEncryptionKey.sha256).",
-       "Re-create disks from snapshots with --csek-key-file.")
 
 
 @check("4.8", "Compute instances have Shielded VM vTPM and integrity monitoring enabled", SEC_VM, 2, "Medium",

@@ -23,7 +23,10 @@ class DemoAuditTests(unittest.TestCase):
         cls.prod = by_id(cls.results)
 
     def test_every_check_produces_a_result(self):
-        self.assertEqual(len(self.results), 2 * len(all_checks()))
+        proj = [c for c in all_checks() if c.scope == "project"]
+        org = [c for c in all_checks() if c.scope == "org"]
+        # project checks run per project; org checks once for the single organization in the hierarchy
+        self.assertEqual(len(self.results), 2 * len(proj) + len(org))
 
     def test_no_unexpected_errors_in_demo(self):
         errs = [(r.project, r.check_id, r.message) for r in self.results if r.status == "ERROR"]
@@ -137,6 +140,79 @@ class ExtendedCoverageTests(unittest.TestCase):
                 return super()._request(method, url, params, body)
         res = by_id(run_audit(Denied(), ["demo-prod"], select_checks(["8 - GKE"])))
         self.assertTrue(all(r.status == "ERROR" for r in res.values()))
+
+
+class OrgScopeAndNewChecksTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.results = run_audit(DemoClient(), ["demo-prod", "demo-empty"], select_checks())
+        cls.prod = by_id(cls.results)
+        cls.org = by_id(cls.results, "org:999")
+
+    def test_org_checks_run_once_per_organization(self):
+        self.assertEqual({r.project for r in self.results if r.check_id.startswith("11.")}, {"org:999"})
+        self.assertEqual(len(self.org), len([c for c in all_checks() if c.scope == "org"]))
+
+    def test_org_findings(self):
+        self.assertEqual(self.org["11.1"].resources, ["user:ceo@gmail.com"])
+        for cid in ("11.1", "11.2", "11.3", "11.4", "11.5", "11.8", "11.9"):
+            self.assertEqual(self.org[cid].status, "FAIL", cid)
+        self.assertEqual(self.org["11.6"].status, "PASS")
+        self.assertEqual(self.org["11.7"].status, "PASS")
+        self.assertEqual(self.org["11.8"].resources, ["LEGAL", "SUSPENSION"])
+
+    def test_separation_of_duties_uses_inherited_org_bindings(self):
+        # demo-prod's own policy has no SoD problem; the organization grants both roles to ops@corp.example
+        self.assertEqual(self.prod["1.8"].resources, ["user:ops@corp.example"])
+        self.assertEqual(self.prod["1.11"].resources, ["user:keys@corp.example"])
+
+    def test_no_organization_gives_clear_na(self):
+        class Standalone(DemoClient):
+            def _request(self, method, url, params=None, body=None):
+                if url.endswith(":getAncestry"):
+                    return {"ancestor": [{"resourceId": {"type": "project", "id": "demo-prod"}}]}
+                return super()._request(method, url, params, body)
+        res = run_audit(Standalone(), ["demo-prod"], select_checks(["11 - Organization level"]))
+        self.assertTrue(res and all(r.status == "N/A" and r.project == "organization" for r in res))
+
+    def test_new_project_checks(self):
+        self.assertEqual(self.prod["2.12"].resources, ["default", "prod-vpc"])
+        self.assertEqual(self.prod["2.16"].resources, ["web-backend"])
+        self.assertEqual(len(self.prod["3.9"].resources), 1)       # only the proxy with no SSL policy
+        self.assertTrue(self.prod["3.9"].resources[0].startswith("web-https-proxy"))
+        self.assertEqual(len(self.prod["4.7"].resources), 2)       # 'vault' has a CSEK so is compliant
+        self.assertIn("CMEK (not CSEK)", self.prod["4.7"].resources[1])
+        self.assertEqual(self.prod["4.11"].status, "FAIL")
+        self.assertEqual(self.prod["7.2"].resources, ["analytics.events"])
+        self.assertEqual(self.prod["10.12"].status, "FAIL")
+
+    def test_only_1_2_and_1_3_remain_manual(self):
+        self.assertEqual(sorted(c.id for c in all_checks() if c.func is None), ["1.2", "1.3"])
+
+    def test_preflight_reports_every_api_without_raising(self):
+        from gcp_cis_audit.preflight import run_preflight
+        rows = run_preflight(DemoClient(), "demo-prod")
+        self.assertGreaterEqual(len(rows), 15)
+        self.assertTrue(all(r["status"] == "OK" for r in rows), [r for r in rows if r["status"] != "OK"])
+        empty = run_preflight(DemoClient(), "demo-empty")
+        self.assertIn("API disabled", {r["status"] for r in empty})
+
+    def test_preflight_classifies_denied_and_errors(self):
+        from gcp_cis_audit.preflight import run_preflight
+
+        class Mixed(DemoClient):
+            def _request(self, method, url, params=None, body=None):
+                if "container.googleapis.com" in url:
+                    raise ApiError(403, "Permission 'container.clusters.list' denied", url)
+                if "dns.googleapis.com" in url:
+                    raise ApiError(500, "backend error", url)
+                if "dataproc" in url:
+                    raise RuntimeError("socket closed")
+                return super()._request(method, url, params, body)
+        by_api = {r["api"]: r["status"] for r in run_preflight(Mixed(), "demo-prod")}
+        self.assertEqual(by_api["GKE"], "Permission denied")
+        self.assertEqual(by_api["Cloud DNS"], "Error")
+        self.assertEqual(by_api["Dataproc"], "Error")
 
 
 class HelperTests(unittest.TestCase):

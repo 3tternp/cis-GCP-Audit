@@ -4,8 +4,10 @@ Imported at the bottom of ``checks.py`` so every check registers in the same REG
 """
 from __future__ import annotations
 
-from .checks import (SEC_DP, SEC_GKE, SEC_IAM, SEC_OP, SEC_SQL, age_days, check, short)
-from .models import evaluate, failed, passed
+from .checks import (SEC_BQ, SEC_DP, SEC_GKE, SEC_IAM, SEC_LOG, SEC_NET, SEC_OP, SEC_ORG, SEC_SQL, SEC_VM,
+                     _vms, age_days, c_1_1, c_1_5, c_1_6, c_2_1, check, inst_name, short)
+from .client import ApiError
+from .models import evaluate, failed, not_applicable, passed
 
 
 # --------------------------------------------------------------------------- #
@@ -238,10 +240,12 @@ _ORG_POLICIES = [
     ("10.10", "compute.requireShieldedVm", "Shielded VM is required", "Medium"),
     ("10.11", "iam.automaticIamGrantsForDefaultServiceAccounts",
      "Default service accounts are not automatically granted Editor", "Medium"),
+    ("10.12", "iam.allowedPolicyMemberDomains",
+     "Domain-restricted sharing limits IAM members to allowed domains", "High", "list"),
 ]
 
 
-def _make_org_policy_check(cid, constraint, title, severity):
+def _make_org_policy_check(cid, constraint, title, severity, kind="bool"):
     @check(cid, f"Org policy: {title}", SEC_OP, 2, severity,
            f"The effective organization policy 'constraints/{constraint}' should be enforced on this project "
            "so the related misconfiguration cannot be introduced.",
@@ -250,7 +254,10 @@ def _make_org_policy_check(cid, constraint, title, severity):
     def fn(ctx):
         pol = ctx.effective_org_policy(constraint)
         rules = (pol.get("spec") or {}).get("rules", []) or []
-        enforced = any(r.get("enforce") is True or r.get("denyAll") is True for r in rules)
+        if kind == "list":   # list constraint: an allow-list must be configured
+            enforced = any((r.get("values") or {}).get("allowedValues") for r in rules)
+        else:
+            enforced = any(r.get("enforce") is True or r.get("denyAll") is True for r in rules)
         return passed(f"constraints/{constraint} is enforced") if enforced else failed(
             f"constraints/{constraint} is not enforced", [constraint])
     return fn
@@ -258,3 +265,202 @@ def _make_org_policy_check(cid, constraint, title, severity):
 
 for _spec in _ORG_POLICIES:
     _make_org_policy_check(*_spec)
+
+
+# --------------------------------------------------------------------------- #
+# Separation of duties (1.8 / 1.11) - evaluated across project + inherited policies
+# --------------------------------------------------------------------------- #
+def _policies(ctx):
+    """The scope's own IAM policy plus every readable ancestor policy."""
+    inherited, _notes = ctx.inherited_policies()
+    return [ctx.iam_policy()] + [p for _label, p in inherited]
+
+
+def _holders(policies, roles):
+    out = set()
+    for pol in policies:
+        for b in pol.get("bindings", []) or []:
+            if b.get("role") in roles:
+                out.update(b.get("members", []))
+    return out
+
+
+def _sod(ctx, roles_a, roles_b):
+    pols = _policies(ctx)
+    return sorted(_holders(pols, roles_a) & _holders(pols, roles_b))
+
+
+@check("1.8", "Separation of duties: no principal holds both Service Account Admin and Service Account User",
+       SEC_IAM, 2, "Medium",
+       "A principal that can both create service accounts and impersonate them can escalate privileges. "
+       "Evaluated across the project and all readable ancestors. Group membership is not expanded.",
+       "Remove one of roles/iam.serviceAccountAdmin or roles/iam.serviceAccountUser from each listed principal.")
+def c_1_8(ctx):
+    bad = _sod(ctx, {"roles/iam.serviceAccountAdmin"}, {"roles/iam.serviceAccountUser"})
+    return failed("Principals hold both roles", bad) if bad else passed("No principal holds both roles")
+
+
+_KMS_USE = {"roles/cloudkms.cryptoKeyEncrypterDecrypter", "roles/cloudkms.cryptoKeyEncrypter",
+            "roles/cloudkms.cryptoKeyDecrypter"}
+
+
+@check("1.11", "Separation of duties: no principal holds Cloud KMS Admin and encrypt/decrypt roles", SEC_IAM, 2,
+       "Medium",
+       "A KMS administrator who can also use keys can read data they should only be able to manage. "
+       "Evaluated across the project and all readable ancestors. Group membership is not expanded.",
+       "Remove roles/cloudkms.admin or the cryptoKey encrypt/decrypt roles from each listed principal.")
+def c_1_11(ctx):
+    bad = _sod(ctx, {"roles/cloudkms.admin"}, _KMS_USE)
+    return failed("Principals hold KMS admin and key-use roles", bad) if bad else passed(
+        "No principal combines KMS admin with key-use roles")
+
+
+# --------------------------------------------------------------------------- #
+# Additional benchmark checks
+# --------------------------------------------------------------------------- #
+@check("2.12", "Cloud DNS logging is enabled for all VPC networks", SEC_LOG, 1, "Medium",
+       "DNS query logs support detection of data exfiltration and malware command-and-control.",
+       "Create a DNS policy with logging enabled and attach it to each VPC: "
+       "gcloud dns policies create P --networks=N --enable-logging --description=...")
+def c_2_12(ctx):
+    nets = ctx.networks()
+    logged = {short(n.get("networkUrl", "")) for p in ctx.dns_policies() if p.get("enableLogging")
+              for n in p.get("networks", []) or []}
+    return evaluate(len(nets), [n["name"] for n in nets if n["name"] not in logged], "VPC networks")
+
+
+@check("2.16", "Logging is enabled for HTTP(S) load balancer backend services", SEC_LOG, 2, "Medium",
+       "Load balancer logs record requests for security analysis and troubleshooting.",
+       "gcloud compute backend-services update BACKEND --global --enable-logging --logging-sample-rate=1.0")
+def c_2_16(ctx):
+    bs = ctx.backend_services()
+    bad = [b["name"] for b in bs if not (b.get("logConfig") or {}).get("enable")]
+    return evaluate(len(bs), bad, "backend services")
+
+
+@check("3.9", "HTTPS/SSL proxy load balancers use an SSL policy without weak ciphers", SEC_NET, 1, "Medium",
+       "Without a restrictive SSL policy, proxies accept legacy TLS versions and weak cipher suites.",
+       "Create an SSL policy (--min-tls-version=1.2 --profile=MODERN or RESTRICTED) and attach it to each proxy.")
+def c_3_9(ctx):
+    proxies = ctx.tls_proxies()
+    if not proxies:
+        return not_applicable("No HTTPS or SSL proxy load balancers in this project")
+    policies = {p["name"]: p for p in ctx.ssl_policies()}
+    bad = []
+    for px in proxies:
+        ref = short(px.get("sslPolicy", ""))
+        pol = policies.get(ref)
+        if not ref:
+            bad.append(f"{px['name']}: no SSL policy (Google default allows TLS 1.0)")
+        elif pol and (pol.get("minTlsVersion") in (None, "TLS_1_0", "TLS_1_1")
+                      or pol.get("profile") == "COMPATIBLE"):
+            bad.append(f"{px['name']}: policy '{ref}' allows TLS<1.2 or the COMPATIBLE profile")
+    return evaluate(len(proxies), bad, "TLS proxies")
+
+
+@check("4.7", "VM disks are encrypted with Customer-Supplied Encryption Keys (CSEK)", SEC_VM, 2, "Medium",
+       "CIS asks for CSEK on disks of critical VMs. Critical VMs cannot be identified through the API, so "
+       "ALL disks are evaluated: CMEK-only and Google-managed disks are reported, and you should filter "
+       "the list to your critical workloads.",
+       "Re-create the disk from a snapshot with --csek-key-file.")
+def c_4_7(ctx):
+    disks = ctx.disks()
+    bad = []
+    for d in disks:
+        key = d.get("diskEncryptionKey") or {}
+        if not key.get("sha256"):
+            kind = "CMEK (not CSEK)" if key.get("kmsKeyName") else "Google-managed key"
+            bad.append(f"{d['name']} ({short(d.get('zone', ''))}): {kind}")
+    return evaluate(len(disks), bad, "disks")
+
+
+@check("4.11", "Compute instances are launched with Confidential VM enabled", SEC_VM, 2, "Low",
+       "Confidential VMs encrypt data in use. Only supported machine families (e.g. N2D, C2D) can enable it.",
+       "Create the instance with --confidential-compute on a supported machine type.")
+def c_4_11(ctx):
+    vms = _vms(ctx)
+    bad = [inst_name(i) for i in vms
+           if not (i.get("confidentialInstanceConfig") or {}).get("enableConfidentialCompute")]
+    return evaluate(len(vms), bad, "VM instances")
+
+
+@check("7.2", "BigQuery tables are encrypted with customer-managed keys", SEC_BQ, 2, "Medium",
+       "CMEK gives control over key lifecycle for table data at rest. At most 200 tables are inspected.",
+       "bq cp -f --destination_kms_key KEY SRC DST, or set a dataset default key (7.3).")
+def c_7_2(ctx):
+    tables, truncated = ctx.bq_tables()
+    bad = [t["_label"] for t in tables if not (t.get("encryptionConfiguration") or {}).get("kmsKeyName")]
+    out = evaluate(len(tables), bad, "tables")
+    if truncated:
+        out.message += " (stopped at the 200-table inspection limit)"
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 11 - Organization level (run once per organization found in the project hierarchy)
+# --------------------------------------------------------------------------- #
+def _org_check(cid, title, severity, desc, rem, fn):
+    check(cid, title, SEC_ORG, 1 if severity == "High" else 2, severity, desc, rem, scope="org")(fn)
+
+
+_org_check("11.1", "Org IAM: no personal @gmail.com accounts hold organization roles", "Medium",
+           "Personal accounts at organization level are unmanaged and may persist after offboarding.",
+           "Replace user:*@gmail.com members with managed corporate identities.", c_1_1)
+_org_check("11.2", "Org IAM: service accounts do not hold admin roles at organization level", "High",
+           "An admin service account at organization level can compromise every project.",
+           "Remove Owner/Editor/*Admin roles from service accounts at organization scope.", c_1_5)
+_org_check("11.3", "Org IAM: no Service Account User / Token Creator granted at organization level", "High",
+           "These roles at organization level allow impersonating any service account in the organization.",
+           "Grant them on individual service accounts or projects instead.", c_1_6)
+_org_check("11.4", "Org IAM: separation of duties for Service Account Admin / User", "Medium",
+           "No principal should hold both roles (group membership is not expanded).",
+           "Split roles/iam.serviceAccountAdmin and roles/iam.serviceAccountUser across principals.", c_1_8)
+_org_check("11.5", "Org IAM: separation of duties for Cloud KMS Admin and key-use roles", "Medium",
+           "No principal should hold Cloud KMS Admin together with encrypt/decrypt roles.",
+           "Split roles/cloudkms.admin from the cryptoKey encrypt/decrypt roles.", c_1_11)
+_org_check("11.6", "Org audit logging covers all services with no exemptions", "High",
+           "Organization-level audit config applies to every project underneath.",
+           "Set an organization-level auditConfig for allServices with ADMIN_READ, DATA_READ, DATA_WRITE "
+           "and no exemptedMembers.", c_2_1)
+
+
+def c_11_7(ctx):
+    sinks = ctx.sinks()
+    good = [s["name"] for s in sinks if s.get("includeChildren") and not s.get("filter")
+            and not s.get("exclusions") and not s.get("disabled")]
+    return passed("Aggregated catch-all sink(s): " + ", ".join(good)) if good else failed(
+        "No enabled aggregated sink (includeChildren, no filter/exclusions) at organization level",
+        [s["name"] for s in sinks])
+
+
+_org_check("11.7", "Org-level aggregated log sink exports all logs from child resources", "Medium",
+           "An aggregated sink preserves logs for every project, even ones created later.",
+           "gcloud logging sinks create NAME DEST --organization=ID --include-children", c_11_7)
+
+
+def c_11_8(ctx):
+    need = {"LEGAL", "SECURITY", "SUSPENSION", "TECHNICAL"}
+    have = set()
+    for c in ctx.essential_contacts():
+        cats = set(c.get("notificationCategorySubscriptions", []) or [])
+        have |= need if "ALL" in cats else cats
+    missing = sorted(need - have)
+    return failed("Essential Contacts missing categories", missing) if missing else passed(
+        "Legal, Security, Suspension and Technical contacts are configured")
+
+
+_org_check("11.8", "Essential Contacts are configured for Legal, Security, Suspension and Technical", "Low",
+           "Google sends security and legal notices only to configured contacts.",
+           "Console > IAM & Admin > Essential Contacts: add contacts for the four categories.", c_11_8)
+
+
+def c_11_9(ctx):
+    rules = (ctx.org_policy("iam.allowedPolicyMemberDomains").get("spec") or {}).get("rules", []) or []
+    ok = any((r.get("values") or {}).get("allowedValues") for r in rules)
+    return passed("Domain-restricted sharing is configured") if ok else failed(
+        "constraints/iam.allowedPolicyMemberDomains has no allow-list", ["iam.allowedPolicyMemberDomains"])
+
+
+_org_check("11.9", "Org policy: domain-restricted sharing is configured at organization level", "High",
+           "Restricts IAM grants to identities from approved domains, blocking accidental external sharing.",
+           "Set constraints/iam.allowedPolicyMemberDomains with your Cloud Identity customer ID(s).", c_11_9)

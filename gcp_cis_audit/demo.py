@@ -33,8 +33,18 @@ _VMS = {"items": {"zones/us-central1-a": {"instances": [
 def _org_iam(u, b):
     # Organization grants DATA_WRITE audit logging; the folder adds nothing.
     if "/organizations/" in u:
-        return {"auditConfigs": [{"service": "allServices", "auditLogConfigs": [
-            {"logType": "ADMIN_READ"}, {"logType": "DATA_READ"}, {"logType": "DATA_WRITE"}]}]}
+        return {
+            "bindings": [
+                {"role": "roles/owner", "members": ["user:ceo@gmail.com"]},
+                {"role": "roles/resourcemanager.organizationAdmin",
+                 "members": ["serviceAccount:org-bot@corp-admin.iam.gserviceaccount.com"]},
+                {"role": "roles/iam.serviceAccountUser", "members": ["user:ops@corp.example"]},
+                {"role": "roles/iam.serviceAccountAdmin", "members": ["user:ops@corp.example"]},
+                {"role": "roles/cloudkms.admin", "members": ["user:keys@corp.example"]},
+                {"role": "roles/cloudkms.cryptoKeyEncrypterDecrypter", "members": ["user:keys@corp.example"]},
+            ],
+            "auditConfigs": [{"service": "allServices", "auditLogConfigs": [
+                {"logType": "ADMIN_READ"}, {"logType": "DATA_READ"}, {"logType": "DATA_WRITE"}]}]}
     return {}
 
 
@@ -93,6 +103,29 @@ _ROUTES = [
     (r"/organizations/\d+/sinks$", lambda u, b: {"sinks": [
         {"name": "org-archive", "destination": "storage.googleapis.com/org-logs", "includeChildren": True}]}),
     (r"/folders/\d+/sinks$", lambda u, b: {}),
+    (r"essentialcontacts.googleapis.com", lambda u, b: {"contacts": [
+        {"email": "security@corp.example", "notificationCategorySubscriptions": ["SECURITY", "TECHNICAL"]}]}),
+    (r"dns.googleapis.com/dns/v1/projects/[^/]+/policies$", lambda u, b: {"policies": [
+        {"name": "default-dns", "enableLogging": False,
+         "networks": [{"networkUrl": f"https://compute.googleapis.com/compute/v1/projects/{_P}/global/networks/prod-vpc"}]}]}),
+    (r"/aggregated/backendServices", lambda u, b: {"items": {"global": {"backendServices": [
+        {"name": "web-backend", "logConfig": {"enable": False}},
+        {"name": "api-backend", "logConfig": {"enable": True, "sampleRate": 1.0}}]}}}),
+    (r"/global/targetHttpsProxies$", lambda u, b: {"items": [
+        {"name": "web-https-proxy", "sslPolicy": ""},
+        {"name": "api-https-proxy",
+         "sslPolicy": f"https://compute.googleapis.com/compute/v1/projects/{_P}/global/sslPolicies/modern"}]}),
+    (r"/global/targetSslProxies$", lambda u, b: {}),
+    (r"/global/sslPolicies$", lambda u, b: {"items": [
+        {"name": "modern", "minTlsVersion": "TLS_1_2", "profile": "MODERN"}]}),
+    (r"/aggregated/disks", lambda u, b: {"items": {"zones/us-central1-a": {"disks": [
+        {"name": "web-1-boot", "zone": "zones/us-central1-a", "diskEncryptionKey": {}},
+        {"name": "db-data", "zone": "zones/us-central1-a", "diskEncryptionKey": {"kmsKeyName": "projects/x/keys/k"}},
+        {"name": "vault", "zone": "zones/us-central1-a", "diskEncryptionKey": {"sha256": "abc123"}}]}}}),
+    (r"/datasets/[^/]+/tables$", lambda u, b: {"tables": [{"tableReference": {"tableId": "events"}},
+                                                          {"tableReference": {"tableId": "users"}}]}),
+    (r"/datasets/[^/]+/tables/users$", lambda u, b: {"encryptionConfiguration": {"kmsKeyName": "projects/x/keys/k"}}),
+    (r"/datasets/[^/]+/tables/[^/]+$", lambda u, b: {}),
     (r"orgpolicy.googleapis.com", _org_policy),
     (r"container.googleapis.com", lambda u, b: _GKE),
     (r"compute/v1/projects/[^/]+/regions$", lambda u, b: {"items": [{"name": "us-central1"}]}),

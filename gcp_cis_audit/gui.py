@@ -268,7 +268,7 @@ class App(tk.Tk):
                 if kind == "result":
                     _, r, done, total = msg
                     self.results.append(r)
-                    self.progress.config(value=done)
+                    self.progress.config(maximum=total, value=done)
                     self.status_text.set(f"[{done}/{total}] {r.project}: {r.check_id}")
                     if self._visible(r):
                         self._insert(r)

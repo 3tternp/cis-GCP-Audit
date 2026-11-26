@@ -45,22 +45,53 @@ def run_check(check: Check, ctx) -> Result:
         return mk(ERROR, f"{type(exc).__name__}: {exc}"[:300])
 
 
+def discover_orgs(client, projects: Iterable[str]) -> List[str]:
+    """Organization IDs found in the hierarchy of the given projects (best effort)."""
+    orgs = set()
+    for p in projects:
+        ancestors, _note = checks_mod.Context(client, p).ancestors()
+        orgs.update(ident for kind, ident in ancestors if kind == "organization")
+    return sorted(orgs)
+
+
 def run_audit(client, projects: List[str], checks: List[Check],
               on_result: Optional[Callable[[Result, int, int], None]] = None,
               stop: Optional[Event] = None) -> List[Result]:
+    """Run project-scope checks per project and org-scope checks once per organization found."""
+    proj_checks = [c for c in checks if c.scope == "project"]
+    org_checks = [c for c in checks if c.scope == "org"]
+    orgs = discover_orgs(client, projects) if org_checks else []
+    total = len(projects) * len(proj_checks) + (len(orgs) or 1) * len(org_checks)
+
     results: List[Result] = []
-    total = len(projects) * len(checks)
     done = 0
+
+    def emit(res: Result):
+        nonlocal done
+        results.append(res)
+        done += 1
+        if on_result:
+            on_result(res, done, total)
+
     for project in projects:
         ctx = checks_mod.Context(client, project)
-        for chk in checks:
+        for chk in proj_checks:
             if stop is not None and stop.is_set():
                 return results
-            res = run_check(chk, ctx)
-            results.append(res)
-            done += 1
-            if on_result:
-                on_result(res, done, total)
+            emit(run_check(chk, ctx))
+
+    if org_checks and not orgs:
+        for chk in org_checks:
+            emit(Result(chk.id, chk.title, chk.section, chk.level, chk.severity, "organization", NA,
+                        "No organization found in the project hierarchy (standalone project, or the "
+                        "hierarchy is not readable with these credentials)", [], chk.description,
+                        chk.remediation))
+    for org in orgs:
+        ctx = checks_mod.OrgContext(client, org)
+        for chk in org_checks:
+            if stop is not None and stop.is_set():
+                return results
+            emit(run_check(chk, ctx))
     return results
 
 

@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CIS GCP Audit</title>
+<link rel="icon" href="/icon.png">
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --ink:#1f2328; --muted:#5f6772; --line:#dfe3e8; --accent:#1a5fd0; --accent-ink:#fff;
+  --pass:#1e8e3e; --fail:#d93025; --error:#c26a00; --manual:#5f6772; --na:#8a929b;
+  --pass-bg:#e6f4ea; --fail-bg:#fce8e6; --error-bg:#fef3e0; --manual-bg:#eef0f3; --na-bg:#f6f7f9;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#14171b; --card:#1c2026; --ink:#e6e8eb; --muted:#9aa3ad; --line:#2d333b; --accent:#5b9bff; --accent-ink:#0b1220;
+  --pass:#5bc27a; --fail:#ff7b72; --error:#f0a050; --manual:#9aa3ad; --na:#7d8590;
+  --pass-bg:#17301f; --fail-bg:#3a1c1b; --error-bg:#3a2a14; --manual-bg:#242a31; --na-bg:#1c2026;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line)}
+header img{width:40px;height:40px}
+header h1{font-size:18px;margin:0}
+header small{color:var(--muted);display:block}
+.badge{margin-left:auto;font-size:12px;padding:3px 10px;border-radius:12px;background:var(--manual-bg);color:var(--muted)}
+.badge.demo{background:var(--error-bg);color:var(--error)}
+main{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px;padding:16px 20px;align-items:start}
+@media(max-width:980px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+.card h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}
+label{display:block;margin:6px 0 2px}
+input[type=text],input[type=password],select{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font:inherit;padding:7px 12px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.5;cursor:default}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
+.hint{color:var(--muted);font-size:12px;margin-top:6px}
+.projects{max-height:190px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:4px 8px;margin:8px 0;background:var(--bg)}
+.projects label{margin:2px 0;display:flex;gap:6px;align-items:center}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px}
+.grid2 label{display:flex;gap:6px;align-items:center;margin:2px 0}
+.summary{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.ring{position:relative;width:92px;height:92px}
+.ring span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{border:1px solid var(--line);border-radius:18px;padding:4px 12px;cursor:pointer;background:var(--card);font-weight:600}
+.chip[aria-pressed=true]{outline:2px solid var(--accent)}
+.chip .n{margin-left:6px}
+.chip.FAIL{color:var(--fail)}.chip.ERROR{color:var(--error)}.chip.PASS{color:var(--pass)}.chip.MANUAL{color:var(--manual)}.chip.NA{color:var(--na)}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:12px 0 4px}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.filters input,.filters select{width:auto;min-width:150px}
+.tablewrap{max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%}
+th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{position:sticky;top:0;background:var(--card);cursor:pointer;user-select:none;z-index:1}
+tbody tr{cursor:pointer}
+tbody tr.FAIL{background:var(--fail-bg)}tbody tr.ERROR{background:var(--error-bg)}tbody tr.PASS{background:var(--pass-bg)}
+tbody tr.MANUAL{background:var(--manual-bg)}tbody tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
+.st{font-weight:700;font-size:12px}
+.st.FAIL{color:var(--fail)}.st.ERROR{color:var(--error)}.st.PASS{color:var(--pass)}.st.MANUAL{color:var(--manual)}.st.NA{color:var(--na)}
+#detail h3{margin:0 0 4px;font-size:15px}
+#detail dt{font-weight:700;margin-top:10px}
+#detail dd{margin:2px 0 0}
+#detail ul{margin:4px 0 0;padding-left:20px;max-height:180px;overflow:auto}
+.empty{color:var(--muted);padding:18px;text-align:center}
+.err{color:var(--fail);margin-top:8px}
+dialog{border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);max-width:760px;width:92%}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+</style>
+</head>
+<body>
+<header>
+  <img src="/icon.png" alt="">
+  <div><h1>CIS GCP Audit</h1><small>Read-only benchmark scanner</small></div>
+  <span id="modeBadge" class="badge">v</span>
+</header>
+
+<main>
+  <aside>
+    <section class="card">
+      <h2>1 · Authentication</h2>
+      <label for="mode">Method</label>
+      <select id="mode">
+        <option value="adc">Application Default Credentials</option>
+        <option value="key">Service account key file</option>
+        <option value="token">OAuth access token</option>
+        <option value="demo">Demo (offline sample data)</option>
+      </select>
+      <div id="keyBox" hidden><label for="keyFile">Key file path (on this machine)</label>
+        <input id="keyFile" type="text" placeholder="C:\keys\auditor.json" autocomplete="off"></div>
+      <div id="tokBox" hidden><label for="token">Access token</label>
+        <input id="token" type="password" autocomplete="off" placeholder="gcloud auth print-access-token"></div>
+      <p class="hint">Credentials go only to this local server (127.0.0.1) and are kept in memory.</p>
+    </section>
+
+    <section class="card">
+      <h2>2 · Projects</h2>
+      <div class="row"><button id="discover">Discover projects</button>
+        <button id="allP">All</button><button id="noneP">None</button></div>
+      <div class="projects" id="projects"><span class="hint">Click “Discover projects” or add one below.</span></div>
+      <div class="row"><input id="addP" type="text" placeholder="project-id" style="flex:1" autocomplete="off">
+        <button id="addBtn">Add</button></div>
+      <div class="row" style="margin-top:8px"><button id="pre">API access preflight</button></div>
+      <div class="hint">Preflight tests the first selected project for missing permissions or disabled APIs.</div>
+    </section>
+
+    <section class="card">
+      <h2>3 · Scope</h2>
+      <div class="grid2" id="sections"></div>
+      <div class="row" style="margin-top:8px">
+        <label style="display:flex;gap:6px;margin:0"><input type="radio" name="lvl" value="1"> Level 1 only</label>
+        <label style="display:flex;gap:6px;margin:0"><input type="radio" name="lvl" value="2" checked> Level 1 + 2</label>
+      </div>
+    </section>
+
+    <div class="row">
+      <button class="primary" id="run" style="flex:1">Run audit</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+    <div id="msg" class="err" role="alert"></div>
+  </aside>
+
+  <section>
+    <div class="card">
+      <div class="summary">
+        <div class="ring">
+          <svg viewBox="0 0 36 36" width="92" height="92">
+            <circle cx="18" cy="18" r="15.9" fill="none" stroke="var(--line)" stroke-width="3.6"/>
+            <circle id="ringArc" cx="18" cy="18" r="15.9" fill="none" stroke="var(--pass)" stroke-width="3.6"
+              stroke-dasharray="0 100" transform="rotate(-90 18 18)" stroke-linecap="round"/>
+          </svg><span id="score">–</span>
+        </div>
+        <div class="chips" id="chips"></div>
+        <div style="margin-left:auto" class="row">
+          <button data-fmt="html" class="exp">HTML</button><button data-fmt="csv" class="exp">CSV</button>
+          <button data-fmt="json" class="exp">JSON</button>
+        </div>
+      </div>
+      <div class="bar"><i id="bar"></i></div>
+      <div class="hint" id="status">Idle.</div>
+
+      <div class="filters">
+        <input id="q" type="text" placeholder="Search title, project, resource…" aria-label="Search results">
+        <select id="secF" aria-label="Section"><option value="">All sections</option></select>
+        <select id="sevF" aria-label="Severity"><option value="">All severities</option>
+          <option>High</option><option>Medium</option><option>Low</option></select>
+        <select id="projF" aria-label="Project"><option value="">All projects</option></select>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <thead><tr>
+            <th data-k="check_id">ID</th><th data-k="project">Project</th><th data-k="title">Recommendation</th>
+            <th data-k="severity">Severity</th><th data-k="status">Status</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="empty" id="empty">No results yet — configure the scan and press “Run audit”.</div>
+      </div>
+    </div>
+
+    <div class="card" id="detail"><div class="empty">Select a row to see the finding, affected resources and remediation.</div></div>
+  </section>
+</main>
+
+<dialog id="preDlg"><div class="row" style="justify-content:space-between"><h2 style="margin:0">API access preflight</h2>
+  <button id="preClose">Close</button></div><div id="preBody" class="hint">…</div></dialog>
+
+<script>
+"use strict";
+const TOKEN = "__TOKEN__";
+const $ = id => document.getElementById(id);
+const STATUSES = ["FAIL", "ERROR", "MANUAL", "PASS", "N/A"];
+const SEV = {High: 0, Medium: 1, Low: 2};
+const ST_RANK = {"FAIL": 0, "ERROR": 1, "MANUAL": 2, "PASS": 3, "N/A": 4};
+let results = [], seen = 0, timer = null, statusFilter = null, sortKey = "check_id", sortDir = 1, selected = null;
+
+function el(tag, props, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") n.className = v; else if (k === "text") n.textContent = v; else n.setAttribute(k, v);
+  }
+  for (const c of kids) if (c != null) n.append(c);
+  return n;
+}
+
+async function api(path, body) {
+  const opt = body === undefined ? {headers: {"X-Token": TOKEN}}
+    : {method: "POST", headers: {"X-Token": TOKEN, "Content-Type": "application/json"}, body: JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(() => ({error: "Bad response from server"}));
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+const auth = () => ({mode: $("mode").value, key_file: $("keyFile").value, token: $("token").value});
+const err = m => { $("msg").textContent = m || ""; };
+const idKey = id => id.split(".").map(Number);
+function cmpId(a, b) { const x = idKey(a), y = idKey(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] ?? -1) - (y[i] ?? -1); if (d) return d; } return 0; }
+
+// ---- setup
+$("mode").onchange = () => { $("keyBox").hidden = $("mode").value !== "key"; $("tokBox").hidden = $("mode").value !== "token"; };
+function addProject(p, checked = true) {
+  p = p.trim(); if (!p) return;
+  if ([...document.querySelectorAll("#projects input")].some(i => i.value === p)) return;
+  if (!$("projects").querySelector("label")) $("projects").textContent = "";
+  const cb = el("input", {type: "checkbox", value: p}); cb.checked = checked;
+  $("projects").append(el("label", {}, cb, document.createTextNode(p)));
+}
+const selectedProjects = () => [...document.querySelectorAll("#projects input:checked")].map(i => i.value);
+$("addBtn").onclick = () => { addProject($("addP").value); $("addP").value = ""; };
+$("addP").onkeydown = e => { if (e.key === "Enter") $("addBtn").click(); };
+$("allP").onclick = () => document.querySelectorAll("#projects input").forEach(i => i.checked = true);
+$("noneP").onclick = () => document.querySelectorAll("#projects input").forEach(i => i.checked = false);
+$("discover").onclick = async () => {
+  err(""); $("discover").disabled = true; $("discover").textContent = "Discovering…";
+  try { const d = await api("/api/projects", {auth: auth()}); $("projects").textContent = ""; d.projects.forEach(p => addProject(p, false));
+    if (!d.projects.length) $("projects").textContent = "No projects visible to these credentials."; }
+  catch (e) { err("Project discovery failed: " + e.message); }
+  $("discover").disabled = false; $("discover").textContent = "Discover projects";
+};
+$("pre").onclick = async () => {
+  const p = selectedProjects()[0] || document.querySelector("#projects input")?.value || $("addP").value.trim();
+  if (!p) return err("Select or enter a project first.");
+  err(""); $("preBody").textContent = "Probing APIs for " + p + "…"; $("preDlg").showModal();
+  try {
+    const d = await api("/api/preflight", {auth: auth(), project: p});
+    const t = el("table", {}, el("thead", {}, el("tr", {}, el("th", {text: "API"}), el("th", {text: "Status"}), el("th", {text: "Needs / detail"}))));
+    const tb = el("tbody"); t.append(tb);
+    for (const r of d.rows) {
+      const cls = r.status === "OK" ? "PASS" : r.status === "API disabled" ? "NA" : "FAIL";
+      tb.append(el("tr", {}, el("td", {text: r.api}), el("td", {class: "st " + cls, text: r.status}),
+        el("td", {text: r.status === "OK" ? "" : (r.needs + (r.detail ? " — " + r.detail : ""))})));
+    }
+    $("preBody").textContent = ""; $("preBody").append(t);
+  } catch (e) { $("preBody").textContent = "Preflight failed: " + e.message; }
+};
+$("preClose").onclick = () => $("preDlg").close();
+
+// ---- running
+$("run").onclick = async () => {
+  err("");
+  const projects = selectedProjects();
+  if (!projects.length) return err("Select at least one project.");
+  const sections = [...document.querySelectorAll("#sections input:checked")].map(i => i.value);
+  const level = +document.querySelector("input[name=lvl]:checked").value;
+  try { await api("/api/start", {auth: auth(), projects, sections, level}); }
+  catch (e) { return err(e.message); }
+  results = []; seen = 0; selected = null; render(); setRunning(true); poll();
+};
+$("stop").onclick = () => api("/api/stop", {}).catch(e => err(e.message));
+function setRunning(r) { $("run").disabled = r; $("stop").disabled = !r; }
+async function poll() {
+  clearTimeout(timer);
+  try {
+    const s = await api("/api/state?since=" + seen);
+    seen = s.count; results.push(...s.results);
+    $("status").textContent = (s.running ? "Running — " : "") + s.status;
+    $("bar").style.width = s.total ? (100 * seen / s.total) + "%" : "0";
+    if (s.error) err(s.error);
+    render(s.summary);
+    if (s.running) { timer = setTimeout(poll, 400); } else { setRunning(false); }
+  } catch (e) { err(e.message); setRunning(false); }
+}
+
+// ---- rendering
+function visible() {
+  const q = $("q").value.trim().toLowerCase(), sec = $("secF").value, sev = $("sevF").value, pr = $("projF").value;
+  return results.filter(r => (!statusFilter || r.status === statusFilter) && (!sec || r.section === sec)
+    && (!sev || r.severity === sev) && (!pr || r.project === pr)
+    && (!q || (r.title + " " + r.project + " " + r.check_id + " " + r.message + " " + r.resources.join(" ")).toLowerCase().includes(q)));
+}
+function render(summary) {
+  summary = summary || {counts: Object.fromEntries(STATUSES.map(s => [s, results.filter(r => r.status === s).length])), score: null};
+  // chips
+  $("chips").textContent = "";
+  for (const s of STATUSES) {
+    const b = el("button", {class: "chip " + s.replace("/", ""), "aria-pressed": String(statusFilter === s)},
+      document.createTextNode(s), el("span", {class: "n", text: summary.counts[s] ?? 0}));
+    b.onclick = () => { statusFilter = statusFilter === s ? null : s; render(summary); };
+    $("chips").append(b);
+  }
+  // score ring
+  const sc = summary.score;
+  $("score").textContent = sc == null ? "–" : Math.round(sc) + "%";
+  $("ringArc").setAttribute("stroke-dasharray", (sc || 0) + " 100");
+  // filter option lists
+  fillSelect("secF", [...new Set(results.map(r => r.section))].sort((a, b) => parseInt(a) - parseInt(b)));
+  fillSelect("projF", [...new Set(results.map(r => r.project))].sort());
+  // rows
+  const rows = visible().sort((a, b) => {
+    let d = sortKey === "check_id" ? cmpId(a.check_id, b.check_id)
+      : sortKey === "severity" ? (SEV[a.severity] ?? 9) - (SEV[b.severity] ?? 9)
+      : sortKey === "status" ? ST_RANK[a.status] - ST_RANK[b.status]
+      : String(a[sortKey]).localeCompare(String(b[sortKey]));
+    return (d || a.project.localeCompare(b.project)) * sortDir;
+  });
+  const tb = $("rows"); tb.textContent = "";
+  const LIMIT = 1500, frag = document.createDocumentFragment();
+  for (const r of rows.slice(0, LIMIT)) {
+    const tr = el("tr", {class: r.status.replace("/", "") + (r === selected ? " sel" : "")},
+      el("td", {text: r.check_id}), el("td", {text: r.project}), el("td", {text: r.title}),
+      el("td", {text: r.severity}), el("td", {class: "st " + r.status.replace("/", ""), text: r.status}));
+    tr.onclick = () => { selected = r; showDetail(r); render(summary); };
+    frag.append(tr);
+  }
+  tb.append(frag);
+  $("empty").hidden = rows.length > 0;
+  $("empty").textContent = results.length ? "No results match the current filters." : "No results yet — configure the scan and press “Run audit”.";
+  document.querySelectorAll(".exp").forEach(b => b.disabled = !results.length);
+}
+function fillSelect(id, values) {
+  const s = $(id), cur = s.value;
+  if ([...s.options].slice(1).map(o => o.value).join("|") === values.join("|")) return;
+  while (s.options.length > 1) s.remove(1);
+  values.forEach(v => s.append(el("option", {value: v, text: v})));
+  s.value = values.includes(cur) ? cur : "";
+}
+function showDetail(r) {
+  const d = $("detail"); d.textContent = "";
+  d.append(el("h3", {text: r.check_id + "  " + r.title}),
+    el("div", {class: "hint", text: `${r.project} · Level ${r.level} · ${r.severity} · ${r.section}`}));
+  const dl = el("dl");
+  dl.append(el("dt", {text: "Status"}), el("dd", {}, el("span", {class: "st " + r.status.replace("/", ""), text: r.status}), document.createTextNode("  " + r.message)));
+  if (r.resources.length) {
+    const ul = el("ul"); r.resources.slice(0, 200).forEach(x => ul.append(el("li", {text: x})));
+    dl.append(el("dt", {text: `Affected (${r.resources.length})`}), el("dd", {}, ul));
+  }
+  dl.append(el("dt", {text: "Rationale"}), el("dd", {text: r.description}), el("dt", {text: "Remediation"}), el("dd", {text: r.remediation}));
+  d.append(dl);
+}
+["q", "secF", "sevF", "projF"].forEach(id => $(id).addEventListener("input", () => render()));
+document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
+  const k = th.dataset.k; sortDir = sortKey === k ? -sortDir : 1; sortKey = k; render();
+});
+document.querySelectorAll(".exp").forEach(b => b.onclick = () => { location.href = `/export/${b.dataset.fmt}?token=${encodeURIComponent(TOKEN)}`; });
+
+// ---- init
+(async () => {
+  try {
+    const m = await api("/api/meta");
+    $("modeBadge").textContent = "v" + m.version + (m.demo ? " · demo" : "");
+    if (m.demo) { $("modeBadge").classList.add("demo"); $("mode").value = "demo"; $("mode").onchange(); }
+    m.sections.forEach(s => $("sections").append(el("label", {}, Object.assign(el("input", {type: "checkbox", value: s}), {checked: true}), document.createTextNode(s))));
+    // restore a running/finished job if the page was reloaded
+    const s = await api("/api/state?since=0");
+    if (s.count) { results.push(...s.results); seen = s.count; render(s.summary); if (s.running) { setRunning(true); poll(); } }
+    else render();
+  } catch (e) { err("Could not reach the local server: " + e.message); }
+})();
+</script>
+</body>
+</html>
